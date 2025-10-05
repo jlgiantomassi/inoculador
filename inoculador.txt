@@ -1,0 +1,216 @@
+#include <Stepper.h>
+//salida de datos del motor de valvula
+const int m1 = 10;
+const int  m2 = 11;
+const int  m3 = 12;
+const int  m4 = 13;
+const int maxApertura=1100;
+
+const int pinCerrado=7; //cable verde
+const int pinAbierto=6; //cable amarillo
+
+//salida al rele de control de bomba
+const int bomba = 8;
+
+//pin del cuadalimetro
+const int  pinCaudal = 2;
+float error = 0.01;
+float caudal = 0.4;
+bool sinAgua = false;
+// Esto es el número de pasos por revolución
+const int  STEPS = 4096; //4096
+// Número de pasos que queremos que de
+int NUMSTEPS;//50
+
+const int releOn = 0;
+const int releOff = 1;
+const int measureInterval = 1500;
+volatile int pulseConter;
+//bool flag=true;
+unsigned long tiempoInicio = 0;
+unsigned long tiempoFinal = 0;
+unsigned long t1 = 0;
+unsigned long t0 = 0;
+float volume = 0;
+unsigned long tiempoT = 5; //tiempo para eliminar ruido en las interrupciones
+float factorK = 85.097;  //80.28->1.06;
+
+// Constructor, pasamos STEPS y los pines donde tengamos conectado el motor
+Stepper stepper(STEPS, m1, m2, m3, m4);
+
+//funcion que se ejecuta cuando hay una interrupcion del caudalimetro
+void ISRCountPulse()
+{
+  if (millis() - tiempoInicio > tiempoT)
+   {
+      pulseConter++;
+      tiempoInicio = millis();
+   }
+  
+
+}
+float GetFrequency()
+{
+   pulseConter = 0;
+ 
+   //interrupts();
+   delay(measureInterval);
+   //noInterrupts();
+ 
+   return (float)pulseConter * 1000 / measureInterval;
+}
+
+//calcula el volumen total que paso por el caudalimetro
+void SumVolume(float dV)
+{
+  volume += dV / 60 * (millis() - t0) / 1000.0;
+  t0 = millis();
+}
+
+unsigned long t;
+
+void setup() {
+  Serial.begin(9600);
+  stepper.setSpeed(6);
+  attachInterrupt(digitalPinToInterrupt(pinCaudal), ISRCountPulse, RISING);
+  Serial.println("Proceso iniciado... ");
+  pinMode(pinCerrado,INPUT);
+  pinMode(pinAbierto,INPUT);
+  // Asignamos la velocidad de la electrovalvula en RPM (Revoluciones por Minuto)
+  digitalWrite(bomba, releOff);
+  pinMode(bomba, OUTPUT);
+  delay(5000);
+  
+  cerrarValvula(); //Se cierra la valvula si esta abierta
+ 
+  Serial.print("El caudal inicial es: ");
+  Serial.println(caudal);
+  t=millis();
+}
+
+bool inicio = true;
+
+void loop() {
+  float Lmin;
+  float porc;
+  float pasos;
+  int giro;
+
+  if(millis()-t>10000)
+    {
+      caudal+=0.1;
+      Serial.print("El caudal ahora es: ");
+      Serial.println(caudal);
+      t=millis();
+    }
+  
+  if (!sinAgua)
+  {
+    digitalWrite(bomba, releOn);
+    
+    Lmin = calcularCaudal();
+    if(Lmin>0.25)
+    {
+      SumVolume(Lmin);
+      if(inicio)
+      {
+        inicio=false;
+        t1=millis();
+      }
+    }
+    Serial.print("El caudal es: ");
+    Serial.println(Lmin, 3);
+    
+    porc = (Lmin / caudal) - 1;
+    
+    if (porc > 0)
+    {
+      giro = -1; //cierra la valvula
+    } else
+    {
+      giro = 1; //abre la valvula
+    }
+
+    if (abs(porc) > 0.8)
+       pasos = 300;
+     
+    else if (abs(porc) > 0.5)
+       pasos = 200;
+     
+    else if (abs(porc) > 0.2)
+       pasos = 100;
+
+    else if (abs(porc) > 0.15)
+       pasos = 50;
+       
+    else if (abs(porc) > 0.1)
+       pasos = 30;    //maxApertura*abs(porc)/3;
+    else if (abs(porc) >= 0.05)
+       pasos = 10; 
+    else if (abs(porc) < 0.05)
+       pasos = 0; 
+    
+    
+    NUMSTEPS = round(pasos * giro);
+    
+     moverValvula(NUMSTEPS);
+    
+    if ((Lmin < 0.2) && (digitalRead(pinAbierto)))
+    {
+      digitalWrite(bomba, releOff);
+      Serial.println("Cerrando Valvula");
+      cerrarValvula();
+      sinAgua = true;
+      Serial.println("Cantidad de agua: ");
+      Serial.println(volume);
+      Serial.println("Tiempo total: ");
+      Serial.println((millis()-t1)/1000);
+    }
+  }
+
+}
+void abrirValvula(void)
+{
+  Serial.println("vamos a abrir la valvula");
+  while(!digitalRead(pinAbierto))  //mientras que no este cerrada la valvula movera 50 pasos hasta lograr cerrarla
+  {
+    moverValvula(50);
+    Serial.println("moviendo valvula");
+  }
+  Serial.println("fin del proceso");
+}
+
+void cerrarValvula(void)
+{
+  Serial.println("vamos a cerrar la valvula");
+  while(!digitalRead(pinCerrado))  //mientras que no este cerrada la valvula movera 50 pasos hasta lograr cerrarla
+  {
+    moverValvula(-50);  
+  }
+  Serial.println("fin del proceso");
+}
+
+
+void moverValvula(int pasos)  //valores de pasos positivos la valvula se abre. valores negativos la valvula se cierra
+{
+  bool flag=false;
+  
+  if ((pasos>0)&&(!digitalRead(pinAbierto)))
+    flag=true;
+  if ((pasos<0)&&(!digitalRead(pinCerrado)))
+    flag=true;
+  if(flag)
+  {
+    Serial.print("pasos recibidos: ");
+    Serial.println(pasos);
+    stepper.step(-pasos);
+  }
+    
+}
+
+float calcularCaudal()
+{
+  float freq=GetFrequency();
+  //float freq = (float)pulseConter * 1000 / measureInterval;
+  return freq / factorK;
+}
